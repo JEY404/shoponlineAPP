@@ -1,39 +1,72 @@
 
-import { prisma } from "../lib/prisma";
+import "dotenv/config";
+
+import { PrismaClient } from "../generated/prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
 
 async function main() {
-  const standardUser = await prisma.user.findUnique({
-    where: { username: "standard_user" },
-  });
+  const databaseUrl = process.env.DATABASE_URL;
 
-  if (!standardUser) {
+  if (!databaseUrl) {
     throw new Error(
-      "No se encontró standard_user. Primero debes cargar los usuarios de QA."
+      "No se encontró DATABASE_URL. Verifica la conexión."
     );
   }
 
-  await prisma.user.upsert({
-    where: { username: "discount_user" },
-    update: {
-      role: "DISCOUNT_TEST",
-      passwordHash: standardUser.passwordHash,
-    },
-    create: {
-      username: "discount_user",
-      passwordHash: standardUser.passwordHash,
-      role: "DISCOUNT_TEST",
-    },
+  // Crear una conexión independiente para este script.
+  // No importamos lib/prisma.ts porque utiliza server-only.
+  const adapter = new PrismaPg({
+    connectionString: databaseUrl,
   });
 
-  console.log("Usuario discount_user creado correctamente.");
-  console.log("Utiliza la misma contraseña de standard_user.");
+  const prisma = new PrismaClient({ adapter });
+
+  try {
+    // Buscar la cuenta estándar existente.
+    const standardUser = await prisma.user.findUnique({
+      where: {
+        username: "standard_user",
+      },
+    });
+
+    if (!standardUser) {
+      throw new Error(
+        "No se encontró standard_user en la base de datos."
+      );
+    }
+
+    // Crear o actualizar el usuario de pruebas.
+    // Reutiliza el hash de la contraseña de standard_user.
+    const discountUser = await prisma.user.upsert({
+      where: {
+        username: "discount_user",
+      },
+      update: {
+        role: "DISCOUNT_TEST",
+        passwordHash: standardUser.passwordHash,
+      },
+      create: {
+        username: "discount_user",
+        role: "DISCOUNT_TEST",
+        passwordHash: standardUser.passwordHash,
+      },
+    });
+
+    console.log("Usuario creado correctamente.");
+    console.log("Username:", discountUser.username);
+    console.log("Rol:", discountUser.role);
+    console.log(
+      "Contraseña: la misma de standard_user."
+    );
+  } finally {
+    await prisma.$disconnect();
+  }
 }
 
-main()
-  .catch((error) => {
-    console.error("No se pudo crear discount_user:", error);
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+main().catch((error) => {
+  console.error(
+    "No se pudo crear discount_user:",
+    error
+  );
+  process.exitCode = 1;
+});
