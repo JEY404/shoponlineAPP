@@ -12,6 +12,7 @@ enum UserRole {
   STANDARD
   CHECKOUT_BUG
   INVENTORY_BUG
+  DISCOUNT_TEST
 }
 
 enum OrderStatus {

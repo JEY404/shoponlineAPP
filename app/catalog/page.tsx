@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/auth";
 import AddToCart from "./AddToCart";
 import Link from "next/link";
+import type { UserRole } from "@/generated/prisma/client";
 
 const formatCOP = (value: number) =>
   new Intl.NumberFormat("es-CO", {
@@ -12,10 +13,13 @@ const formatCOP = (value: number) =>
     maximumFractionDigits: 0,
   }).format(value);
 
-const profileNames = {
-  STANDARD: "Usuario funcional",
-  CHECKOUT_BUG: "Usuario con bugs de compra",
+
+
+const profileNames: Record<UserRole, string> = {
+  STANDARD: "Usuario estándar",
+  CHECKOUT_BUG: "Usuario con bugs de checkout",
   INVENTORY_BUG: "Usuario con bugs de inventario",
+  DISCOUNT_TEST: "Usuario de prueba de descuentos",
 };
 
 const productEmojis: Record<string, string> = {

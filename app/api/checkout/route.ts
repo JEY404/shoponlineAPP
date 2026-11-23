@@ -3,9 +3,11 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/auth";
-
-const MIN_TOTAL = 1_000_000;
-const MIN_UNITS = 20;
+import {
+  calculateFirstPurchaseDiscount,
+  MINIMUM_ORDER_TOTAL,
+  MINIMUM_ORDER_UNITS,
+} from "@/lib/first-purchase-discount";
 
 class CheckoutError extends Error {
   constructor(
@@ -31,48 +33,43 @@ export async function POST() {
       );
     }
 
-    const order = await prisma.$transaction(
+    const result = await prisma.$transaction(
       async (tx) => {
         const cart = await tx.cart.findUnique({
           where: { userId: user.id },
           include: {
             items: {
-              include: {
-                product: true,
-              },
+              include: { product: true },
             },
           },
         });
 
-        // RF-07: carrito vacío
         if (!cart || cart.items.length === 0) {
           throw new CheckoutError(
             "No puedes confirmar un pedido con el carrito vacío."
           );
         }
 
-        // Calcular totales desde la base de datos
         const totalUnits = cart.items.reduce(
           (sum, item) => sum + item.quantity,
           0
         );
 
-        const total = cart.items.reduce(
+        const subtotal = cart.items.reduce(
           (sum, item) =>
             sum + item.quantity * item.product.price,
           0
         );
 
         if (
-          !Number.isSafeInteger(total) ||
-          !Number.isSafeInteger(totalUnits)
+          !Number.isSafeInteger(totalUnits) ||
+          !Number.isSafeInteger(subtotal)
         ) {
           throw new CheckoutError(
             "Los valores del pedido son inválidos."
           );
         }
 
-        // RF-04 y RF-05: verificar cantidades
         for (const item of cart.items) {
           if (
             !item.product.active ||
@@ -91,29 +88,76 @@ export async function POST() {
           }
         }
 
-        // RF-09: cantidad mínima de 20 unidades
-        if (totalUnits < MIN_UNITS) {
+        if (totalUnits < MINIMUM_ORDER_UNITS) {
           throw new CheckoutError(
             `El pedido requiere al menos 20 unidades. Actualmente tienes ${totalUnits}.`
           );
         }
 
-        // BUG INTENCIONAL DE CHECKOUT
-        // Rechaza incorrectamente el valor exacto
-        // de $1.000.000 para checkout_bug_user.
+        // Conservamos el error intencional de CHECKOUT_BUG.
         const validAmount =
           user.role === "CHECKOUT_BUG"
-            ? total > MIN_TOTAL
-            : total >= MIN_TOTAL;
+            ? subtotal > MINIMUM_ORDER_TOTAL
+            : subtotal >= MINIMUM_ORDER_TOTAL;
 
         if (!validAmount) {
           throw new CheckoutError(
-            `El pedido no cumple el monto mínimo de $1.000.000 COP. Total actual: $${total.toLocaleString("es-CO")} COP.`
+            `El pedido no cumple el monto mínimo de $1.000.000 COP. Total actual: $${subtotal.toLocaleString("es-CO")} COP.`
           );
         }
 
-        // Descontar inventario solamente
-        // cuando se cumplen los requisitos.
+        // El usuario de pruebas siempre es elegible.
+        const isDiscountTest =
+          user.role === "DISCOUNT_TEST";
+
+        const previousConfirmedOrders = isDiscountTest
+          ? 0
+          : await tx.order.count({
+              where: {
+                userId: user.id,
+                status: "CONFIRMED",
+              },
+            });
+
+        const discountDetails =
+          calculateFirstPurchaseDiscount(
+            subtotal,
+            totalUnits,
+            previousConfirmedOrders > 0
+          );
+
+        const discount = discountDetails.discount;
+        const finalTotal = discountDetails.finalTotal;
+
+        if (
+          !Number.isSafeInteger(finalTotal) ||
+          finalTotal < 0
+        ) {
+          throw new CheckoutError(
+            "El total final del pedido es inválido."
+          );
+        }
+
+        // Cuenta especial para pruebas repetibles de RN-07.
+        // No crea pedidos y no modifica el inventario.
+        if (isDiscountTest) {
+          await tx.cartItem.deleteMany({
+            where: { cartId: cart.id },
+          });
+
+          return {
+            id: `TEST-${crypto.randomUUID()}`,
+            subtotal,
+            discount,
+            total: finalTotal,
+            totalUnits,
+            status: "CONFIRMED" as const,
+            firstPurchaseDiscountApplied: true,
+            simulated: true,
+          };
+        }
+
+        // Compras normales: actualizar inventario.
         for (const item of cart.items) {
           const updated = await tx.product.updateMany({
             where: {
@@ -138,11 +182,10 @@ export async function POST() {
           }
         }
 
-        // RF-08: registrar pedido
         const newOrder = await tx.order.create({
           data: {
             userId: user.id,
-            total,
+            total: finalTotal,
             totalUnits,
             status: "CONFIRMED",
             items: {
@@ -157,28 +200,35 @@ export async function POST() {
           },
         });
 
-        // Vaciar el carrito después de crear el pedido
         await tx.cartItem.deleteMany({
           where: { cartId: cart.id },
         });
 
-        return newOrder;
+        return {
+          id: newOrder.id,
+          subtotal,
+          discount,
+          total: finalTotal,
+          totalUnits,
+          status: newOrder.status,
+          firstPurchaseDiscountApplied:
+            discountDetails.eligibleForDiscount,
+          simulated: false,
+        };
       },
       {
-        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        isolationLevel:
+          Prisma.TransactionIsolationLevel.Serializable,
         timeout: 10000,
       }
     );
 
     return NextResponse.json({
       success: true,
-      message: "¡Tu pedido fue confirmado correctamente!",
-      order: {
-        id: order.id,
-        total: order.total,
-        totalUnits: order.totalUnits,
-        status: order.status,
-      },
+      message: result.simulated
+        ? "¡Compra de prueba confirmada! Se aplicó el 10 % de descuento. No se registró un pedido ni se modificó el inventario."
+        : "¡Tu pedido fue confirmado correctamente!",
+      order: result,
     });
   } catch (error) {
     if (error instanceof CheckoutError) {
@@ -191,7 +241,6 @@ export async function POST() {
       );
     }
 
-    // Conflictos de concurrencia
     if (
       typeof error === "object" &&
       error !== null &&
@@ -202,7 +251,7 @@ export async function POST() {
         {
           success: false,
           message:
-            "El inventario cambió durante la compra. Intenta nuevamente.",
+            "La compra entró en conflicto con otra operación. Intenta nuevamente.",
         },
         { status: 409 }
       );
@@ -213,8 +262,7 @@ export async function POST() {
     return NextResponse.json(
       {
         success: false,
-        message:
-          "Ocurrió un error al procesar el pedido.",
+        message: "Ocurrió un error al procesar el pedido.",
       },
       { status: 500 }
     );

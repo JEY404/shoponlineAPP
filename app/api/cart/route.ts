@@ -2,6 +2,9 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/auth";
+import {
+  calculateFirstPurchaseDiscount,
+} from "@/lib/first-purchase-discount";
 
 function errorResponse(
   message: string,
@@ -17,7 +20,7 @@ function serverError(error: unknown) {
   console.error("ERROR EN API CART:", error);
 
   return errorResponse(
-    "Error interno del carrito. Revisa la terminal de Next.js.",
+    "Error interno del carrito.",
     500
   );
 }
@@ -47,8 +50,8 @@ export async function GET() {
       const actualSubtotal =
         item.product.price * item.quantity;
 
-      // BUG-I03:
-      // Se calcula un 50% adicional incorrectamente.
+      // Se conserva el comportamiento BUG-I03:
+      // subtotal incorrecto para inventory_bug_user
       const subtotal = isInventoryBug
         ? Math.round(actualSubtotal * 1.5)
         : actualSubtotal;
@@ -68,6 +71,8 @@ export async function GET() {
       a.code.localeCompare(b.code)
     );
 
+    // Total mostrado por el carrito.
+    // Conserva el comportamiento de INVENTORY_BUG.
     const total = items.reduce(
       (sum, item) => sum + item.subtotal,
       0
@@ -78,11 +83,52 @@ export async function GET() {
       0
     );
 
+    // Subtotal real, sin errores intencionales de UI
+    const actualSubtotal = (cart?.items ?? []).reduce(
+      (sum, item) =>
+        sum + item.product.price * item.quantity,
+      0
+    );
+
+    const previousConfirmedOrders =
+      user.role === "DISCOUNT_TEST"
+        ? 0
+        : await prisma.order.count({
+            where: {
+              userId: user.id,
+              status: "CONFIRMED",
+            },
+          });
+
+    const discountDetails =
+      calculateFirstPurchaseDiscount(
+        actualSubtotal,
+        totalUnits,
+        previousConfirmedOrders > 0
+      );
+
+    // Datos adicionales para el resumen visual.
+    //
+    // La confirmación volverá a calcularlos
+    // usando los datos actualizados de la BD.
     return NextResponse.json({
       success: true,
       items,
+
+      // Campos originales: se mantienen
       total,
       totalUnits,
+
+      // Campos nuevos para RN-07
+      subtotal: total,
+      discount: discountDetails.discount,
+      finalTotal:
+        total - discountDetails.discount,
+      eligibleForDiscount:
+        discountDetails.eligibleForDiscount,
+      isFirstPurchase:
+        previousConfirmedOrders === 0,
+      discountPercentage: 10,
     });
   } catch (error) {
     return serverError(error);
@@ -156,7 +202,8 @@ export async function POST(request: Request) {
       user.role === "INVENTORY_BUG";
 
     // BUG-I01:
-    // Permite agregar más productos del stock.
+    // Se conserva la posibilidad de superar el stock
+    // al agregar productos con inventory_bug_user.
     if (
       !isInventoryBug &&
       newQuantity > product.stock
@@ -223,7 +270,8 @@ export async function PATCH(request: Request) {
       user.role === "INVENTORY_BUG";
 
     // BUG-I02:
-    // Permite cantidad cero incorrectamente.
+    // Se conserva la posibilidad de cantidad cero
+    // para inventory_bug_user.
     if (isInventoryBug) {
       if (quantity < 0) {
         return errorResponse(
