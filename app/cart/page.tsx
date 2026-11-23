@@ -19,6 +19,13 @@ type CartData = {
   items: CartItem[];
   total: number;
   totalUnits: number;
+  // Campos que devuelve GET /api/cart para RN-07.
+  subtotal?: number;
+  discount?: number;
+  finalTotal?: number;
+  eligibleForDiscount?: boolean;
+  isFirstPurchase?: boolean;
+  discountPercentage?: number;
 };
 
 type ApiResult = {
@@ -26,6 +33,9 @@ type ApiResult = {
   message?: string;
   order?: {
     id: string;
+    simulated?: boolean;
+    discount?: number;
+    total?: number;
   };
 };
 
@@ -231,6 +241,18 @@ export default function CartPage() {
 
       await loadCart();
 
+      // Las operaciones de discount_user no quedan en el historial.
+      // Mostrar la confirmación en el carrito para permitir repetirlas.
+      if (data.order?.simulated) {
+        setIsError(false);
+        setMessage(
+          `${data.message ?? "Compra simulada confirmada."} ` +
+          `Descuento aplicado: ${formatCOP(data.order.discount ?? 0)}. ` +
+          `Total de prueba: ${formatCOP(data.order.total ?? 0)}.`
+        );
+        return;
+      }
+
       router.push("/orders");
       router.refresh();
     } catch (error) {
@@ -244,6 +266,18 @@ export default function CartPage() {
       setBusy(false);
     }
   }
+
+  // Las condiciones mayoristas se validan con precios reales,
+  // antes de aplicar el descuento. El importe mostrado del carrito
+  // puede ser diferente en el perfil de prueba INVENTORY_BUG.
+  const realSubtotal = (cart?.items ?? []).reduce(
+    (sum, item) => sum + item.price * item.quantity,
+    0
+  );
+  const meetsMinimumAmount = realSubtotal >= 1_000_000;
+  const meetsMinimumUnits = (cart?.totalUnits ?? 0) >= 20;
+  const estimatedDiscount = cart?.discount ?? 0;
+  const estimatedTotal = cart?.finalTotal ?? cart?.total ?? 0;
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900">
@@ -462,16 +496,46 @@ export default function CartPage() {
                     <strong>{cart.items.length}</strong>
                   </div>
 
-                  <div className="border-t border-slate-200 pt-4">
-                    <div className="flex justify-between">
-                      <span className="font-bold">
-                        Total
+                  <div className="border-t border-slate-200 pt-4 space-y-3">
+                    <div className="flex justify-between gap-3">
+                      <span className="text-slate-600">
+                        Subtotal
                       </span>
+                      <strong>{formatCOP(cart.total)}</strong>
+                    </div>
 
+                    {estimatedDiscount > 0 && (
+                      <div className="flex justify-between gap-3 text-green-700">
+                        <span>Descuento primera compra (10 %)</span>
+                        <strong>-{formatCOP(estimatedDiscount)}</strong>
+                      </div>
+                    )}
+
+                    <div className="flex justify-between gap-3 border-t border-slate-200 pt-3">
+                      <span className="font-bold">
+                        Total a pagar
+                      </span>
                       <strong className="text-xl text-blue-800">
-                        {formatCOP(cart.total)}
+                        {formatCOP(estimatedTotal)}
                       </strong>
                     </div>
+
+                    {cart.isFirstPurchase && (
+                      <p className="rounded-lg bg-green-50 p-3 text-xs text-green-800">
+                        {cart.eligibleForDiscount
+                          ? "¡Descuento disponible! Tu primera compra cumple los mínimos y tiene un 10 % de descuento."
+                          : "Tienes disponible un 10 % para tu primera compra. Se aplicará cuando el pedido cumpla los mínimos de compra."}
+                      </p>
+                    )}
+
+                    {!cart.isFirstPurchase && (
+                      <p className="text-xs text-slate-500">
+                        El descuento de primera compra ya no está disponible para esta cuenta.
+                      </p>
+                    )}
+                    <p className="text-xs text-slate-500">
+                      El descuento es estimado; la confirmación verifica nuevamente el pedido.
+                    </p>
                   </div>
                 </div>
 
@@ -482,23 +546,23 @@ export default function CartPage() {
 
                   <p
                     className={
-                      cart.total >= 1000000
+                      meetsMinimumAmount
                         ? "text-green-700"
                         : "text-amber-700"
                     }
                   >
-                    {cart.total >= 1000000 ? "✓" : "○"}{" "}
+                    {meetsMinimumAmount ? "✓" : "○"}{" "}
                     Mínimo {formatCOP(1000000)}
                   </p>
 
                   <p
                     className={
-                      cart.totalUnits >= 20
+                      meetsMinimumUnits
                         ? "text-green-700"
                         : "text-amber-700"
                     }
                   >
-                    {cart.totalUnits >= 20 ? "✓" : "○"}{" "}
+                    {meetsMinimumUnits ? "✓" : "○"}{" "}
                     Mínimo 20 unidades
                   </p>
                 </div>

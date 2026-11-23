@@ -135,6 +135,7 @@ export default function LoginPage() {
               ["standard_user", "Sistema funcional"],
               ["checkout_bug_user", "Errores de checkout"],
               ["inventory_bug_user", "Errores de inventario"],
+              ["discount_user", "Pruebas del descuento del 10 %"],
             ].map(([user, description]) => (
               <div
                 key={user}
@@ -149,7 +150,7 @@ export default function LoginPage() {
           </div>
 
           <p className="mt-4 border-t border-blue-200 pt-3 text-xs text-slate-500">
-            Utiliza la contraseña de prueba configurada en el seed.
+            Utiliza la contraseña de QA configurada para las cuentas. discount_user tiene la misma contraseña de standard_user.
           </p>
         </div>
       </div>
